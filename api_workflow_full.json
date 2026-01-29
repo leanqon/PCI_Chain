@@ -1,0 +1,101 @@
+{
+    "workflow_description": "PCIChain 完整工作流（含自修正机制）",
+    "stages": {
+        "stage_1": "初始推理（T1-T5顺序执行）",
+        "stage_2": "一致性检查（矛盾检测）",
+        "stage_3": "自修正（如有矛盾则触发）",
+        "stage_4": "最终报告生成"
+    },
+    "stage_1_initial_inference": {
+        "description": "依次调用 T1→T2→T3→T4→T5，每个Agent使用api_test_inputs.json中的请求体"
+    },
+    "stage_2_consistency_check": {
+        "model": "gpt-5.2-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": "# 角色：医学一致性检查专家\n\n你是一位资深的医学质控专家，负责审核多个AI Agent的输出是否存在逻辑矛盾或不一致。\n\n## 任务\n检查以下几类潜在矛盾：\n\n### 1. 冠脉-心功能矛盾\n- 如果 T1 报告\"LAD近段完全闭塞\"，但 T2 估计\"LVEF正常(≥50%)\"→可能矛盾（大面积前壁梗死通常导致LVEF下降）\n- 如果 T1 报告\"三支病变\"，但 T2 估计\"LVEF正常\"→需要核实\n\n### 2. 诊断-用药矛盾\n- 如果 T3 诊断\"LVEF<40%\"，但 T4 未推荐 ACEI/ARB + β阻滞剂→矛盾\n- 如果 T3 诊断\"有活动性出血\"，但 T4 推荐 DAPT→禁忌症矛盾\n\n### 3. 数据来源矛盾\n- 心超报告 LVEF=35%，但 T2 推断 LVEF≥50%→需要核实\n- 冠脉造影显示\"RCA 90%狭窄\"，但 T1 未提取→遗漏\n\n### 4. 临床合理性检查\n- 70岁高血压患者仅推荐\"生活方式干预\"而无药物→可能不足\n- ACS患者未使用任何抗血小板药物→严重遗漏\n\n## 输出格式\n请以JSON格式输出：\n{\n  \"has_contradiction\": true/false,\n  \"contradictions\": [\n    {\n      \"type\": \"矛盾类型\",\n      \"agents_involved\": [\"T1\", \"T2\"],\n      \"description\": \"矛盾描述\",\n      \"severity\": \"严重/中等/轻微\",\n      \"resolution_suggestion\": \"建议如何解决\"\n    }\n  ],\n  \"warnings\": [\n    {\n      \"type\": \"警告类型\",\n      \"description\": \"警告描述\",\n      \"action_required\": \"需要的动作\"\n    }\n  ],\n  \"overall_consistency_score\": 0.0-1.0,\n  \"recommendation\": \"通过/需要自修正/需要人工审核\"\n}"
+            },
+            {
+                "role": "user",
+                "content": "请检查以下各Agent输出的一致性：\n\n## T1 冠脉Agent输出：\n{\n  \"vessels\": [{\"name\": \"LAD\", \"stenosis\": \"85%（近段）, 50%（中段）\", \"intervention\": \"PCI+支架\"}],\n  \"lesion_type\": \"单支病变\",\n  \"confidence\": 0.95\n}\n\n## T2 心功能Agent输出：\n{\n  \"lvef_grade\": \"正常\",\n  \"estimated_lvef\": \"63%\",\n  \"confidence\": 0.85,\n  \"reasoning\": \"患者为首发不稳定型心绞痛，无既往心梗史，单支病变，无心衰症状，支持LVEF保留\"\n}\n\n## T3 诊断Agent输出：\n{\n  \"primary_diagnosis\": {\"name\": \"不稳定型心绞痛\", \"icd10\": \"I20.0\"},\n  \"comorbidities\": [{\"name\": \"高血压3级（极高危）\", \"icd10\": \"I10\"}],\n  \"risk_stratification\": \"极高危\",\n  \"confidence\": 0.9\n}\n\n## T4 用药Agent输出：\n{\n  \"recommendations\": [\n    {\"drug_class\": \"DAPT\", \"drug_name\": \"阿司匹林+氯吡格雷\", \"dose\": \"100mg+75mg qd\", \"duration\": \"12个月\", \"strength\": \"强烈推荐\"},\n    {\"drug_class\": \"他汀\", \"drug_name\": \"阿托伐他汀\", \"dose\": \"20mg qn\", \"strength\": \"强烈推荐\"},\n    {\"drug_class\": \"ARB\", \"drug_name\": \"厄贝沙坦氢氯噻嗪\", \"dose\": \"150mg qd\", \"strength\": \"推荐（因高血压）\"},\n    {\"drug_class\": \"β阻滞剂\", \"drug_name\": \"美托洛尔缓释片\", \"dose\": \"47.5mg qd\", \"strength\": \"推荐（ACS后3年）\"},\n    {\"drug_class\": \"PPI\", \"drug_name\": \"泮托拉唑\", \"dose\": \"40mg qd\", \"strength\": \"推荐（胃肠保护）\"}\n  ],\n  \"confidence\": 0.85\n}\n\n## 原始病历摘要：\n- 70岁女性，胸闷2月余\n- 心超：LVEF 63%\n- 冠脉造影：LAD近段85%狭窄，中段50%狭窄\n- 已行PCI+支架\n- 合并高血压3级、反流性食管炎"
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": 1500
+    },
+    "stage_3_self_correction": {
+        "description": "仅在 stage_2 检测到矛盾时触发",
+        "trigger_condition": "has_contradiction == true && severity in ['严重', '中等']",
+        "correction_request": {
+            "model": "gpt-5.2-chat",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "# 角色：医学矛盾解决专家\n\n你需要根据一致性检查报告中发现的矛盾，重新审视原始数据，并给出修正后的输出。\n\n## 修正原则\n1. **优先使用客观数据**：心超报告的LVEF值优先于临床推断\n2. **遵循指南**：当存在用药矛盾时，参考ESC/AHA指南\n3. **保守原则**：不确定时采用更保守的估计\n4. **溯源原则**：明确指出修正依据来自哪份原始资料\n\n## 输出格式\n{\n  \"original_error\": \"原始错误描述\",\n  \"correction\": {\n    \"agent\": \"需要修正的Agent（T1/T2/T3/T4）\",\n    \"field\": \"需要修正的字段\",\n    \"original_value\": \"原值\",\n    \"corrected_value\": \"修正值\",\n    \"evidence\": \"修正依据\"\n  },\n  \"updated_output\": { ... 修正后的完整Agent输出 ... },\n  \"confidence_after_correction\": 0.0-1.0\n}"
+                },
+                {
+                    "role": "user",
+                    "content": "## 一致性检查报告发现的矛盾：\n[粘贴 stage_2 的输出]\n\n## 原始病历：\n[粘贴完整病历]\n\n请进行自修正。"
+                }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 2000
+        }
+    },
+    "stage_4_final_report": {
+        "description": "使用一致性检查通过或自修正后的输出，生成最终MDT报告",
+        "use_agent": "T5_Report_Agent（见 api_test_inputs.json）",
+        "additional_context": "在T5请求中添加一致性检查结果和修正记录"
+    },
+    "example_contradiction_scenario": {
+        "scenario": "假设 T2 错误地推断 LVEF<40%，但心超报告显示 LVEF=63%",
+        "stage_2_output": {
+            "has_contradiction": true,
+            "contradictions": [
+                {
+                    "type": "数据来源矛盾",
+                    "agents_involved": [
+                        "T2"
+                    ],
+                    "description": "T2推断LVEF<40%，但原始心超报告明确显示LVEF=63%",
+                    "severity": "严重",
+                    "resolution_suggestion": "应优先采用心超客观测量值，修正T2输出"
+                }
+            ],
+            "overall_consistency_score": 0.4,
+            "recommendation": "需要自修正"
+        },
+        "stage_3_output": {
+            "original_error": "T2忽略了心超报告中的客观LVEF值(63%)，错误推断为LVEF<40%",
+            "correction": {
+                "agent": "T2",
+                "field": "lvef_grade",
+                "original_value": "重度降低(<30%)",
+                "corrected_value": "正常(≥50%)",
+                "evidence": "心超报告(2022/2/18)明确记载：左室EF为63％"
+            },
+            "downstream_impact": "T4用药建议中的ACEI/β阻滞剂强推荐等级需要降级，因为患者LVEF正常",
+            "confidence_after_correction": 0.95
+        }
+    },
+    "usage_instructions": {
+        "step_1": "执行 api_test_inputs.json 中的 T1-T5 请求",
+        "step_2": "将所有输出汇总后，执行本文件中的 stage_2_consistency_check 请求",
+        "step_3": "如果 has_contradiction=true 且 severity≠'轻微'，执行 stage_3_self_correction",
+        "step_4": "将修正后的输出传入 T5_Report_Agent 生成最终报告",
+        "step_5": "记录整个流程的Token消耗用于成本分析"
+    },
+    "token_estimation_full_workflow": {
+        "stage_1_total": 10650,
+        "stage_2_input": 2500,
+        "stage_2_output": 800,
+        "stage_3_input": 3000,
+        "stage_3_output": 1000,
+        "stage_4_additional": 500,
+        "total_without_correction": 14450,
+        "total_with_correction": 18450,
+        "cost_without_correction_usd": 0.07,
+        "cost_with_correction_usd": 0.09
+    }
+}
