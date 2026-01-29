@@ -1,4 +1,4 @@
-# PCIChain Code
+# PCIChain
 
 This folder contains the code used to run PCIChain experiments, prompts, and evaluation workflows.
 
